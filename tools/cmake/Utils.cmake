@@ -47,6 +47,27 @@ function(executorch_msvc_kernel_link_options target_name)
   )
 endfunction()
 
+# Add a whole-archive reference to a static library on a consumer's link line.
+#
+# This is deliberately a link option rather than a link library: CMake refuses
+# to mix the WHOLE_ARCHIVE link feature with the plain references other targets
+# make to the same archive, and link options are also emitted before the ordered
+# link libraries, which is what keeps a bundled archive ahead of anything that
+# would otherwise satisfy the same symbols.
+function(executorch_target_whole_archive target_name archive_target)
+  if(APPLE)
+    set(_flags "SHELL:LINKER:-force_load,$<TARGET_FILE:${archive_target}>")
+  elseif(MSVC)
+    set(_flags "SHELL:LINKER:/WHOLEARCHIVE:$<TARGET_FILE:${archive_target}>")
+  else()
+    set(_flags
+        "SHELL:LINKER:--whole-archive $<TARGET_FILE:${archive_target}> LINKER:--no-whole-archive"
+    )
+  endif()
+  target_link_options(${target_name} PRIVATE "${_flags}")
+  add_dependencies(${target_name} ${archive_target})
+endfunction()
+
 # Ensure that the load-time constructor functions run. By default, the linker
 # would remove them since there are no other references to them.
 function(executorch_target_link_options_shared_lib target_name)
@@ -210,6 +231,46 @@ function(executorch_target_copy_mlx_metallib target)
       )
     endif()
   endif()
+endfunction()
+
+# Make a target resolve the ExecuTorch runtime from libexecutorch.so.
+#
+# Naming the shared runtime as an ordinary dependency is not enough. CMake
+# orders link libraries so that an archive precedes what it depends on, which
+# puts libexecutorch_core.a ahead of libexecutorch.so; the archive then
+# satisfies the runtime symbols first and the target ends up with a private copy
+# of the backend registry. Link options come before the ordered libraries, so
+# naming the runtime there leaves the archive with nothing left to resolve.
+#
+# On ELF platforms --no-as-needed is needed around it, because a shared library
+# with no already-referenced symbol at the point it appears can be dropped, and
+# the static archive further along the line would then supply the registry after
+# all. Other linkers keep the reference without it.
+function(executorch_target_link_shared_runtime target_name)
+  if(NOT EXECUTORCH_BUILD_SHARED)
+    return()
+  endif()
+  if(APPLE OR MSVC)
+    set(_runtime_flags "SHELL:$<TARGET_FILE:executorch_shared>")
+  else()
+    # --no-as-needed keeps the runtime in DT_NEEDED even though no symbol has
+    # been referenced yet at this point on the link line. It is wrapped in
+    # push-state/pop-state rather than closed with an explicit --as-needed so
+    # that whatever policy was in effect before is restored: closing with
+    # --as-needed would leave that in force for everything that follows, and
+    # would drop shared backends whose only purpose is static-init registration.
+    set(_runtime_flags
+        "SHELL:LINKER:--push-state,--no-as-needed $<TARGET_FILE:executorch_shared> LINKER:--pop-state"
+    )
+  endif()
+  # The generator expression alone does not make the runtime get built first, so
+  # state the build-order dependency explicitly.
+  add_dependencies(${target_name} executorch_shared)
+  set_property(
+    TARGET ${target_name}
+    APPEND
+    PROPERTY LINK_OPTIONS "${_runtime_flags}"
+  )
 endfunction()
 
 # Create and install a shared library composed from dependency libraries. The

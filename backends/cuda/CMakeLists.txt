@@ -93,8 +93,17 @@ target_compile_options(
   PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${_cuda_cxx_compile_options}>"
 )
 
-# Link against ExecuTorch core libraries
-target_link_libraries(cuda_platform PRIVATE executorch_core ${CMAKE_DL_LIBS})
+# Link against ExecuTorch core libraries. Resolve them from the shared runtime
+# when there is one, so this does not carry a second copy of the backend
+# registry.
+if(EXECUTORCH_BUILD_SHARED)
+  target_link_libraries(
+    cuda_platform PRIVATE executorch_shared ${CMAKE_DL_LIBS}
+  )
+  executorch_target_link_shared_runtime(cuda_platform)
+else()
+  target_link_libraries(cuda_platform PRIVATE executorch_core ${CMAKE_DL_LIBS})
+endif()
 
 install(
   TARGETS cuda_platform
@@ -169,14 +178,9 @@ if(_cuda_is_msvc_toolchain)
 else()
   target_link_libraries(
     aoti_cuda_shims
-    PRIVATE cuda_platform
-    PUBLIC -Wl,--whole-archive
-           aoti_common_shims_slim
-           -Wl,--no-whole-archive
-           CUDA::cudart
-           CUDA::curand
-           extension_cuda
-           ${CMAKE_DL_LIBS}
+    PRIVATE cuda_platform -Wl,--whole-archive aoti_common_shims_slim
+            -Wl,--no-whole-archive
+    PUBLIC CUDA::cudart CUDA::curand extension_cuda ${CMAKE_DL_LIBS}
   )
 endif()
 
@@ -200,7 +204,52 @@ if(_cuda_is_msvc_toolchain)
   list(APPEND _aoti_cuda_backend_sources runtime/cuda_allocator.cpp)
 endif()
 
-add_library(aoti_cuda_backend STATIC ${_aoti_cuda_backend_sources})
+# Build the delegate as a shared library for the wheel so a process has one copy
+# of it, and keep it static everywhere else so no other build changes.
+if(EXECUTORCH_BUILD_SHARED)
+  set(_aoti_cuda_backend_library_type SHARED)
+else()
+  set(_aoti_cuda_backend_library_type STATIC)
+endif()
+add_library(
+  aoti_cuda_backend ${_aoti_cuda_backend_library_type}
+                    ${_aoti_cuda_backend_sources}
+)
+if(EXECUTORCH_BUILD_SHARED)
+  set_target_properties(
+    aoti_cuda_backend
+    PROPERTIES OUTPUT_NAME executorch_cuda_backend
+               VERSION "${PROJECT_VERSION}"
+               SOVERSION "${PROJECT_VERSION_MAJOR}"
+  )
+  if(NOT APPLE)
+    # Ships in the wheel's lib/ directory, but the CUDA shim library it links
+    # lives under backends/cuda, so both locations have to be searchable. The
+    # CUDA runtime itself comes from the environment and is not bundled.
+    set(_cuda_backend_rpath "$ORIGIN:$ORIGIN/../backends/cuda")
+    set_target_properties(
+      aoti_cuda_backend PROPERTIES BUILD_RPATH "${_cuda_backend_rpath}"
+                                   INSTALL_RPATH "${_cuda_backend_rpath}"
+    )
+  endif()
+endif()
+
+# Outside the shared-runtime guard on purpose: the shim and the extension
+# library it links are packaged for any CUDA build, so the path that lets the
+# shim find that library has to be set whenever both exist, not only alongside a
+# shared runtime.
+if(NOT APPLE AND TARGET aoti_cuda_shims)
+  # The shim needs its own entry rather than relying on the backend's. A RUNPATH
+  # applies to the library that carries it, not to what its own dependencies
+  # need, so loading the shim first, or on its own, would fail to find the
+  # extension library it links. The shim ships under backends/cuda while that
+  # library ships in the wheel's lib/ directory.
+  set(_cuda_shims_rpath "$ORIGIN:$ORIGIN/../../lib")
+  set_target_properties(
+    aoti_cuda_shims PROPERTIES BUILD_RPATH "${_cuda_shims_rpath}"
+                               INSTALL_RPATH "${_cuda_shims_rpath}"
+  )
+endif()
 
 target_include_directories(
   aoti_cuda_backend

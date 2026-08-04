@@ -66,7 +66,7 @@ Point CMake at the installed package when you configure:
 
 ```
 cmake -S . -B build \
-  -DCMAKE_PREFIX_PATH="$(python -c 'import executorch, pathlib; print(pathlib.Path(executorch.__path__[0]) / "share" / "cmake")')"
+  -DCMAKE_PREFIX_PATH="$(python -c 'import executorch, pathlib; print(pathlib.Path(executorch.__path__[0]))')"
 cmake --build build
 ```
 
@@ -110,6 +110,7 @@ each one is defined only when the installed wheel actually ships it:
 | `executorch::threadpool` | The shared thread pool the kernels and backends use. |
 | `executorch::kernels` | CPU operator kernels, for any operator not taken by a backend. |
 | `executorch::xnnpack_backend` | The XNNPACK backend, for optimized CPU execution. |
+| `executorch::cuda_backend` | The CUDA backend. Only in a CUDA wheel. |
 
 Each target already carries what it needs: the runtime dependency, the include
 directories, the runtime search paths, and the linker options that keep a

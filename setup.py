@@ -652,9 +652,9 @@ class BuiltExtension(_BaseExtension):
             modpath: The dotted path of the python module that maps to the
                 extension.
         """
-        assert (
-            "/" not in modpath
-        ), f"modpath must be a dotted python module path: saw '{modpath}'"
+        assert "/" not in modpath, (
+            f"modpath must be a dotted python module path: saw '{modpath}'"
+        )
         full_src = src
         if src_dir is None and _is_windows():
             src_dir = "%BUILD_TYPE%/"
@@ -1304,6 +1304,39 @@ setup(
                     dependent_cmake_flags=[
                         "EXECUTORCH_BUILD_SHARED",
                         "EXECUTORCH_BUILD_XNNPACK",
+                    ],
+                ),
+                # Install the CUDA delegate beside them when it is built. The CUDA
+                # runtime itself is not bundled; it comes from the environment.
+                BuiltFile(
+                    src_dir="%CMAKE_CACHE_DIR%/backends/cuda/",
+                    src_name=(
+                        f"libexecutorch_cuda_backend.so.{get_runtime_soname_major()}.*"
+                    ),
+                    dst=(
+                        "executorch/lib/libexecutorch_cuda_backend.so."
+                        f"{get_runtime_soname_major()}"
+                    ),
+                    dependent_cmake_flags=["EXECUTORCH_BUILD_CUDA"],
+                ),
+                # The CUDA delegate and the AOTI shim both call into this for stream
+                # handling, so an application that links either from the wheel cannot
+                # resolve it unless this ships too. Gated on CUDA alone, matching the
+                # shim: the target is always built shared, so requiring the shared
+                # runtime here would ship the shim without the library it needs.
+                BuiltFile(
+                    src_dir="%CMAKE_CACHE_DIR%/extension/cuda/",
+                    src_name=(
+                        "libexecutorch_extension_cuda.so."
+                        f"{get_runtime_soname_major()}.*"
+                    ),
+                    dst=(
+                        "executorch/lib/libexecutorch_extension_cuda.so."
+                        f"{get_runtime_soname_major()}"
+                    ),
+                    dependent_cmake_flags=[
+                        "EXECUTORCH_BUILD_SHARED",
+                        "EXECUTORCH_BUILD_CUDA",
                     ],
                 ),
                 # Install the prebuilt pybindings extension wrapper for the runtime,

@@ -107,6 +107,7 @@ each one is defined only when the installed wheel actually ships it:
 | Target | What it provides |
 | --- | --- |
 | `executorch::runtime` | The core runtime. Always present. |
+| `executorch::threadpool` | The shared thread pool the kernels and backends use. |
 
 Each target already carries what it needs: the runtime dependency, the include
 directories, the runtime search paths, and the linker options that keep a

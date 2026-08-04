@@ -1205,9 +1205,15 @@ if(EXECUTORCH_BUILD_PYBIND)
   endif()
 
   if(EXECUTORCH_BUILD_XNNPACK)
-    # need to explicitly specify XNNPACK and xnnpack-microkernels-prod here
-    # otherwise uses XNNPACK and microkernel-prod symbols from libtorch_cpu
-    list(APPEND _dep_libs xnnpack_backend XNNPACK xnnpack-microkernels-prod)
+    if(EXECUTORCH_BUILD_SHARED)
+      # The delegate bundles XNNPACK and its microkernels, so naming them again
+      # here would ship a second copy.
+      list(APPEND _dep_libs xnnpack_backend)
+    else()
+      # need to explicitly specify XNNPACK and xnnpack-microkernels-prod here
+      # otherwise uses XNNPACK and microkernel-prod symbols from libtorch_cpu
+      list(APPEND _dep_libs xnnpack_backend XNNPACK xnnpack-microkernels-prod)
+    endif()
   endif()
 
   if(EXECUTORCH_BUILD_VULKAN)
@@ -1262,14 +1268,17 @@ if(EXECUTORCH_BUILD_PYBIND)
   target_compile_options(portable_lib PUBLIC ${_pybind_compile_options})
   target_link_libraries(portable_lib PRIVATE ${_dep_libs})
   executorch_target_link_shared_runtime(portable_lib)
-  # The operators register themselves from a static initializer, so nothing here
-  # references a symbol from the kernels library and some linkers drop it, which
-  # surfaces at runtime as a missing kernel rather than a link error.
-  if(TARGET optimized_native_cpu_ops_lib)
-    executorch_target_retain_shared_library(
-      portable_lib optimized_native_cpu_ops_lib
-    )
-  endif()
+  # These libraries register their operators or their backend from a static
+  # initializer, so nothing here references a symbol from them and some linkers
+  # drop them from DT_NEEDED. That surfaces at runtime as a missing kernel or an
+  # unregistered backend rather than as a link error.
+  foreach(_retained_component optimized_native_cpu_ops_lib xnnpack_backend)
+    if(TARGET ${_retained_component})
+      executorch_target_retain_shared_library(
+        portable_lib ${_retained_component}
+      )
+    endif()
+  endforeach()
 
   # Set RPATH to find PyTorch and backend libraries relative to the installation
   # location. This goes from executorch/extension/pybindings up to

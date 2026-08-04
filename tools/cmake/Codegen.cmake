@@ -274,9 +274,13 @@ function(gen_custom_ops_aot_lib)
 endfunction()
 
 # Generate a runtime lib for registering operators in Executorch
+#
+# SHARED opts this library into being a shared object. It is opt-in because most
+# callers want the default static library, and only the one shipped in the wheel
+# needs to be shared so a process has a single copy of the kernels.
 function(gen_operators_lib)
   set(multi_arg_names LIB_NAME KERNEL_LIBS DEPS DTYPE_SELECTIVE_BUILD)
-  cmake_parse_arguments(GEN "" "" "${multi_arg_names}" ${ARGN})
+  cmake_parse_arguments(GEN "SHARED" "" "${multi_arg_names}" ${ARGN})
 
   message(STATUS "Generating operator lib:")
   message(STATUS "  LIB_NAME: ${GEN_LIB_NAME}")
@@ -289,7 +293,24 @@ function(gen_operators_lib)
     set(_opvariant_h ${_out_dir}/selected_op_variants.h)
   endif()
 
-  add_library(${GEN_LIB_NAME})
+  if(GEN_SHARED)
+    add_library(${GEN_LIB_NAME} SHARED)
+    set_target_properties(
+      ${GEN_LIB_NAME}
+      PROPERTIES OUTPUT_NAME executorch_${GEN_LIB_NAME}
+                 VERSION "${PROJECT_VERSION}"
+                 SOVERSION "${PROJECT_VERSION_MAJOR}"
+    )
+    if(NOT APPLE)
+      # Ships beside the runtime in the wheel's lib/ directory.
+      set_target_properties(
+        ${GEN_LIB_NAME} PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH
+                                                         "$ORIGIN"
+      )
+    endif()
+  else()
+    add_library(${GEN_LIB_NAME})
+  endif()
 
   set(_srcs_list ${_out_dir}/RegisterCodegenUnboxedKernelsEverything.cpp
                  ${_out_dir}/Functions.h ${_out_dir}/NativeFunctions.h
@@ -299,6 +320,13 @@ function(gen_operators_lib)
   endif()
   target_sources(${GEN_LIB_NAME} PRIVATE ${_srcs_list})
   target_link_libraries(${GEN_LIB_NAME} PRIVATE ${GEN_DEPS})
+  if(GEN_SHARED)
+    # Resolve the runtime from the shared library rather than from the static
+    # core in GEN_DEPS. Linking the static core gives this library its own copy
+    # of the operator table, so its static initializer registers into a table
+    # nothing else reads and the operators appear missing at run time.
+    executorch_target_link_shared_runtime(${GEN_LIB_NAME})
+  endif()
   set(portable_kernels_check "portable_kernels")
   if(GEN_KERNEL_LIBS)
 

@@ -240,6 +240,8 @@ function(executorch_define_component _suffix _library_name)
   )
 endfunction()
 
+executorch_define_component(threadpool executorch_threadpool)
+
 # Find prebuilt _portable_lib.<EXT_SUFFIX>.so. This is the legacy contract used
 # to build custom-op extensions against the Python module, and is kept working
 # independently of the runtime target above.

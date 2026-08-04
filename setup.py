@@ -1289,6 +1289,23 @@ setup(
                         "EXECUTORCH_BUILD_KERNELS_OPTIMIZED",
                     ],
                 ),
+                # Install the XNNPACK delegate beside them, so a process has one
+                # copy of it instead of one per component that uses it.
+                BuiltFile(
+                    src_dir="%CMAKE_CACHE_DIR%/backends/xnnpack/",
+                    src_name=(
+                        "libexecutorch_xnnpack_backend.so."
+                        f"{get_runtime_soname_major()}.*"
+                    ),
+                    dst=(
+                        "executorch/lib/libexecutorch_xnnpack_backend.so."
+                        f"{get_runtime_soname_major()}"
+                    ),
+                    dependent_cmake_flags=[
+                        "EXECUTORCH_BUILD_SHARED",
+                        "EXECUTORCH_BUILD_XNNPACK",
+                    ],
+                ),
                 # Install the prebuilt pybindings extension wrapper for the runtime,
                 # portable kernels, and a selection of backends. This lets users
                 # load and execute .pte files from python.

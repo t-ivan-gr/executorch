@@ -313,6 +313,47 @@ def get_build_type(is_debug=None) -> str:
     return "Debug" if debug else "Release"
 
 
+# Headers whose implementations are built as separate targets and are not part of
+# the runtime the wheel ships. Copying them would let an application compile
+# against an API it then cannot link. This is a list rather than a rule because
+# the wheel copies header trees by directory while the runtime's sources are
+# chosen per target, so there is nothing to derive the answer from. A supported
+# header set expressed alongside the runtime's own source list would remove the
+# need for it.
+_UNSUPPORTED_WHEEL_HEADERS = frozenset(
+    {
+        # These two include a third-party header the wheel does not ship, so they cannot
+        # compile from an installed package no matter what is linked.
+        "cpuinfo_utils.h",
+        "threadpool.h",
+        # These three compile, but declare entry points whose definitions are not in any
+        # shipped library, so a consumer that includes them fails at link time.
+        "bundled_module.h",
+        "file_descriptor_data_loader.h",
+        "serialize.h",
+    }
+)
+
+# Headers excluded by path rather than by name, because the same file name is also used
+# by a header that does compile. Each of these includes something the wheel does not
+# ship, so it cannot build from an installed package.
+_UNSUPPORTED_WHEEL_HEADER_PATHS = (
+    # Includes a generated schema header that is not part of the shipped tree.
+    "runtime/executor/tensor_parser.h",
+    # GoogleTest and GoogleMock helpers, which a runtime package has no reason to ship.
+    "runtime/core/exec_aten/testing_util/tensor_util.h",
+    "runtime/core/testing_util/error_matchers.h",
+)
+
+
+def _is_unsupported_wheel_header(source: Path) -> bool:
+    """Whether a header cannot compile from an installed package."""
+    if source.name in _UNSUPPORTED_WHEEL_HEADERS:
+        return True
+    posix = source.as_posix()
+    return any(posix.endswith(suffix) for suffix in _UNSUPPORTED_WHEEL_HEADER_PATHS)
+
+
 def get_dynamic_lib_name(name: str) -> str:
     if _is_windows():
         return f"{name}.dll"
@@ -320,6 +361,120 @@ def get_dynamic_lib_name(name: str) -> str:
         return f"lib{name}.dylib"
     else:
         return f"lib{name}.so"
+
+
+def _write_cmake_version_file(destination: str) -> None:
+    """Generate the CMake package version file next to the package config.
+
+    Read from version.txt so the version CMake reports is the same one the wheel and
+    the runtime SONAME use.
+
+    Written by hand rather than configured from CMake's own template for one reason the template
+    cannot express: it also publishes the full build version, including any prerelease suffix and
+    local label, which a consumer needs when it must pair with one exact build. CMake's numeric
+    version drops those parts, so two prereleases of one release compare equal.
+
+    The compatibility rule itself matches the stock same-major behaviour. That was checked rather
+    than assumed, across plain versions, inclusive and exclusive ranges, cross-major requests and
+    exact requests, and the two agree on every case. An earlier version of this text claimed the
+    stock template refuses an exclusive upper bound at the next major. That is wrong: it accepts
+    1.0...<2.0 for a 1.4.0 package exactly as this file does.
+    """
+    # The same version the wheel publishes, including any BUILD_VERSION override, so one
+    # artifact cannot report one identity to pip and a different one to CMake.
+    version = Version.string()
+    # CMake executes this file to decide whether the package is acceptable, so a quote or a
+    # backslash in the version would be a parse error rather than a bad comparison, and
+    # find_package would hard-fail for every consumer. The normal pipeline cannot produce one,
+    # but BUILD_VERSION is an unvalidated environment override.
+    assert not set(version) & set('"\\'), (
+        f"version {version!r} contains a character that cannot appear in the generated CMake "
+        "version file"
+    )
+    # A pre-release suffix is not a CMake version component, so keep the numeric
+    # prefix and let compatibility be decided on the major.
+    numeric = re.match(r"\d+(?:\.\d+){0,2}", version)
+    numeric = numeric.group(0) if numeric else "0.0.0"
+    major = numeric.split(".")[0]
+    # Only an exclusive bound at the immediately following major means "any {major}.x",
+    # which is the idiomatic way to ask for this release series.
+    next_major = str(int(major) + 1)
+
+    contents = f"""\
+set(PACKAGE_VERSION "{numeric}")
+
+# The full version this package was built from. PACKAGE_VERSION drops a prerelease suffix
+# and a local version label because neither is a CMake version component, so two different
+# prereleases of one release compare equal. A consumer that must pair with one exact build
+# compares this instead.
+set(EXECUTORCH_BUILD_VERSION "{version}")
+
+if(NOT PACKAGE_FIND_VERSION)
+  # No version requested, so any version satisfies it.
+  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+elseif(PACKAGE_FIND_VERSION_RANGE)
+  # A range request such as 1.0...1.2 sets its own variables, and checking only
+  # PACKAGE_FIND_VERSION would compare against the lower bound alone and accept a package
+  # the range excludes.
+  if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION_MIN)
+    set(PACKAGE_VERSION_UNSUITABLE TRUE)
+  elseif(PACKAGE_FIND_VERSION_RANGE_MAX STREQUAL "INCLUDE"
+         AND PACKAGE_VERSION VERSION_GREATER PACKAGE_FIND_VERSION_MAX)
+    set(PACKAGE_VERSION_UNSUITABLE TRUE)
+  elseif(PACKAGE_FIND_VERSION_RANGE_MAX STREQUAL "EXCLUDE"
+         AND NOT PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION_MAX)
+    set(PACKAGE_VERSION_UNSUITABLE TRUE)
+  elseif(NOT PACKAGE_FIND_VERSION_MIN_MAJOR STREQUAL "{major}")
+    # Same major rule as below: a different major means a different shared runtime.
+    set(PACKAGE_VERSION_UNSUITABLE TRUE)
+  elseif(PACKAGE_FIND_VERSION_MAX_MAJOR
+         AND NOT PACKAGE_FIND_VERSION_MAX_MAJOR STREQUAL "{major}"
+         AND NOT (PACKAGE_FIND_VERSION_RANGE_MAX STREQUAL "EXCLUDE"
+                  AND PACKAGE_FIND_VERSION_MAX_MAJOR EQUAL {next_major}
+                  AND PACKAGE_FIND_VERSION_MAX_MINOR EQUAL 0
+                  AND PACKAGE_FIND_VERSION_MAX_PATCH EQUAL 0))
+    # Both endpoints have to share the major, the way CMake's own template requires.
+    # Checking only the lower one accepts a range such as 1.0...3.0 against a 1.x
+    # runtime, which tells a consumer that majors 2 and 3 are satisfied too.
+    set(PACKAGE_VERSION_UNSUITABLE TRUE)
+  else()
+    set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  endif()
+elseif(PACKAGE_FIND_VERSION_MAJOR STREQUAL "{major}")
+  # SameMajorVersion, matching the runtime's SONAME: a consumer asking for {major}.x
+  # gets any {major}.y, and a request for a different major is refused because the
+  # shared runtime it would link is not the one it asked for.
+  #
+  # A request above this version is refused too. Matching only the major would let a
+  # package satisfy a request for a release it predates, so a consumer needing something
+  # added later would link this runtime instead of being told it is not here.
+  if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+    set(PACKAGE_VERSION_UNSUITABLE TRUE)
+  else()
+    set(PACKAGE_VERSION_COMPATIBLE TRUE)
+    if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+      set(PACKAGE_VERSION_EXACT TRUE)
+    endif()
+  endif()
+else()
+  set(PACKAGE_VERSION_UNSUITABLE TRUE)
+endif()
+"""
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    with open(destination, "w") as handle:
+        handle.write(contents)
+
+
+def get_runtime_soname_major() -> str:
+    """The major version in the shared runtime's SONAME.
+
+    CMake derives SOVERSION from version.txt, so read the major from the same
+    place. Version.string() is not usable here because BUILD_VERSION can
+    override it without changing what the linker recorded.
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(root, "version.txt")) as f:
+        return f.read().strip().split(".")[0]
 
 
 def get_executable_name(name: str) -> str:
@@ -702,6 +857,18 @@ class CustomBuildPy(build_py):
                     if os.path.isfile(os.path.join(_root, _f))
                 ]
 
+    @staticmethod
+    def _write_cmake_version_files(dst_root: str) -> None:
+        """Put a CMake version file beside each copy of the package config.
+
+        Without one, CMake rejects any versioned find_package because it cannot tell
+        what version the package is, even when the package is usable.
+        """
+        for config_dir in ("share/cmake", "lib/cmake/executorch"):
+            _write_cmake_version_file(
+                os.path.join(dst_root, config_dir, "executorch-config-version.cmake")
+            )
+
     def run(self):
         # Copy python files to the output directory. This set of files is
         # defined by the py_module list and package_data patterns.
@@ -745,6 +912,15 @@ class CustomBuildPy(build_py):
                     "tools/cmake/executorch-wheel-config.cmake",
                     "share/cmake/executorch-config.cmake",
                 ),
+                # Also at the standard location, so a consumer can point
+                # CMAKE_PREFIX_PATH at the installed package root. CMake only
+                # searches lib/cmake/<package name> and a few similar directories
+                # for a named package, not a bare share/cmake, so without this a
+                # consumer has to know the exact leaf holding the file.
+                (
+                    "tools/cmake/executorch-wheel-config.cmake",
+                    "lib/cmake/executorch/executorch-config.cmake",
+                ),
             ]
             # Copy all the necessary headers into include/executorch/ so that they can
             # be found in the pip package. This is the subset of headers that are
@@ -758,12 +934,18 @@ class CustomBuildPy(build_py):
                 "runtime/kernel/",
                 "runtime/backend/",
                 "runtime/platform/",
+                "extension/data_loader/",
+                "extension/flat_tensor/",
                 "extension/kernel_util/",
+                "extension/module/",
+                "extension/named_data_map/",
                 "extension/tensor/",
                 "extension/threadpool/",
             ]:
                 src_list = Path(include_dir).rglob("*.h")
                 for src in src_list:
+                    if _is_unsupported_wheel_header(src):
+                        continue
                     src_to_dst.append(
                         (str(src), os.path.join("include/executorch", str(src)))
                     )
@@ -780,6 +962,8 @@ class CustomBuildPy(build_py):
             # the mode. This ensures that the output file is read/write even if
             # the input file is read-only.
             self.copy_file(src, dst, preserve_mode=False)
+
+        self._write_cmake_version_files(dst_root)
 
         # Copy CMake-generated Python directories that setuptools missed.
         # Setuptools discovers packages at configuration time, before CMake
@@ -1089,6 +1273,15 @@ setup(
             []
             if _is_minimal_build()
             else [
+                # Install the shared C++ runtime so a standalone application can
+                # link executorch::runtime from the wheel. Shipped under its
+                # SONAME so the DT_NEEDED a consumer records resolves at runtime.
+                BuiltFile(
+                    src_dir="%CMAKE_CACHE_DIR%/",
+                    src_name=f"libexecutorch.so.{get_runtime_soname_major()}.*",
+                    dst=f"executorch/lib/libexecutorch.so.{get_runtime_soname_major()}",
+                    dependent_cmake_flags=["EXECUTORCH_BUILD_SHARED"],
+                ),
                 # Install the prebuilt pybindings extension wrapper for the runtime,
                 # portable kernels, and a selection of backends. This lets users
                 # load and execute .pte files from python.

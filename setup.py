@@ -1288,7 +1288,7 @@ setup(
                 BuiltFile(
                     src_dir="%CMAKE_CACHE_DIR%/extension/threadpool/",
                     src_name=(
-                        "libexecutorch_threadpool.so." f"{get_runtime_soname_major()}.*"
+                        f"libexecutorch_threadpool.so.{get_runtime_soname_major()}.*"
                     ),
                     dst=(
                         "executorch/lib/libexecutorch_threadpool.so."
@@ -1302,6 +1302,27 @@ setup(
                         "EXECUTORCH_BUILD_SHARED",
                         "EXECUTORCH_BUILD_PTHREADPOOL",
                         "EXECUTORCH_BUILD_CPUINFO",
+                    ],
+                ),
+                # Install the merged CPU kernels beside them, so the operators are
+                # registered once per process rather than once per component.
+                BuiltFile(
+                    src_dir="%CMAKE_CACHE_DIR%/configurations/",
+                    src_name=(
+                        "libexecutorch_kernels_optimized.so."
+                        f"{get_runtime_soname_major()}.*"
+                    ),
+                    dst=(
+                        "executorch/lib/"
+                        "libexecutorch_kernels_optimized.so."
+                        f"{get_runtime_soname_major()}"
+                    ),
+                    # The target is only created when the optimized kernels are
+                    # enabled, so packaging has to require that too rather than
+                    # looking for a file a shared build may never have produced.
+                    dependent_cmake_flags=[
+                        "EXECUTORCH_BUILD_SHARED",
+                        "EXECUTORCH_BUILD_KERNELS_OPTIMIZED",
                     ],
                 ),
                 # Install the prebuilt pybindings extension wrapper for the runtime,

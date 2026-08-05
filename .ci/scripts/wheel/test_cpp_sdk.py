@@ -43,6 +43,19 @@ _REGISTRY_SYMBOLS = (
 # oversubscribes the CPU because each pool sizes itself to all cores.
 _THREADPOOL_SYMBOLS = ("executorch::extension::threadpool::get_threadpool",)
 
+# A representative operator from the merged CPU kernels. A second definer means
+# the operators are registered twice, which aborts at startup.
+_KERNEL_SYMBOLS = ("torch::executor::native::abs_out",)
+
+# The registry entry points, kept separate from the kernel implementations above.
+# A library that carries its own copy of these has its own registration code, which
+# is what this split is meant to prevent: one owner of the operator table. Checking
+# only a kernel implementation would miss that entirely.
+_KERNEL_REGISTRY_SYMBOLS = (
+    "executorch::runtime::register_kernels",
+    "executorch::runtime::get_registered_kernels",
+)
+
 # `nm -DC` prints "<hexaddr> <kind> <name>" for a definition and
 # "                 U <name>" for an undefined reference.
 _DEFINED = re.compile(r"^[0-9a-fA-F]+\s+(?P<kind>[A-Za-z])\s+(?P<name>.+)$")
@@ -169,6 +182,16 @@ def test_single_backend_registry() -> None:
 def test_single_threadpool() -> None:
     """Exactly one shipped library may define the thread pool accessor."""
     _assert_single_definer(_THREADPOOL_SYMBOLS, "thread pool")
+
+
+def test_single_kernel_registration() -> None:
+    """Exactly one shipped library may define the merged CPU kernels."""
+    _assert_single_definer(_KERNEL_SYMBOLS, "set of CPU kernels")
+    # Ownership of the operator table, not just of a kernel implementation. A
+    # second copy means a second table, and a static initializer registering into
+    # a table nothing else reads shows up as an operator that is missing at run
+    # time rather than as a link error.
+    _assert_single_definer(_KERNEL_REGISTRY_SYMBOLS, "operator registry")
 
 
 def test_cpp_consumer(work_dir: Path) -> None:
@@ -761,7 +784,7 @@ target_link_libraries(component_consumer PRIVATE executorch::runtime)
 
 # Link every component this wheel offers, and report which ones those are so the test
 # can check the result. Guarded individually because the set depends on the wheel.
-foreach(_component threadpool)
+foreach(_component threadpool kernels_optimized)
   if(TARGET executorch::${_component})
     target_link_libraries(component_consumer PRIVATE executorch::${_component})
     # Report the library file, not just the target name: the two differ, and the test
@@ -929,6 +952,7 @@ def run_tests(work_dir: Path) -> None:
     test_custom_op_compiles(work_dir)
     test_no_absolute_runtime_paths()
     test_single_threadpool()
+    test_single_kernel_registration()
     test_cpp_consumer(work_dir)
     test_documented_example_compiles(work_dir)
     test_component_targets_link(work_dir)

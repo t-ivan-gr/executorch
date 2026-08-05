@@ -44,8 +44,8 @@
 # dependency and, for a registration-only library, the link options that keep it
 # from being dropped. The names, when present, are:
 #
-# executorch::threadpool executorch::kernels executorch::xnnpack_backend
-# executorch::cuda_backend
+# executorch::threadpool executorch::kernels_optimized
+# executorch::xnnpack_backend executorch::cuda_backend
 #
 # Check with if(TARGET executorch::<name>) rather than assuming one exists. A
 # namespaced name that was never defined is a configure-time error that names
@@ -374,6 +374,11 @@ function(executorch_define_component _suffix _library_name)
 endfunction()
 
 executorch_define_component(threadpool executorch_threadpool)
+
+# The merged CPU kernels. Documented as a component and asserted by the release
+# checks, so it has to be defined here or a consumer following the documentation
+# gets a bare name that CMake hands to the linker as a literal flag.
+executorch_define_component(kernels_optimized executorch_kernels_optimized)
 
 # A consumer that links the thread pool has to see the same switch a source
 # build sets, or the parallel helpers in the runtime headers compile their

@@ -383,6 +383,10 @@ executorch_define_component(kernels_optimized executorch_kernels_optimized)
 # runs them on plain CPU. A model delegated to XNNPACK does not need this,
 # because that delegate claims the quantize and dequantize operators itself.
 executorch_define_component(kernels_quantized executorch_kernels_quantized)
+# The profiler. A C++ application could not record timing data from an installed
+# package before, because the implementation shipped only inside the Python
+# extension.
+executorch_define_component(etdump executorch_etdump)
 
 # A consumer that links the thread pool has to see the same switch a source
 # build sets, or the parallel helpers in the runtime headers compile their

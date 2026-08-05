@@ -108,6 +108,67 @@ def _is_minimal_build() -> bool:
     return _is_env_flag_enabled("EXECUTORCH_BUILD_MINIMAL")
 
 
+def _cuda_train() -> str:
+    """The CUDA train this wheel is being built for, as a bare number like "130".
+
+    Read from the wheel build environment rather than detected from an installed compiler.
+    A CPU wheel built on a machine that happens to have a CUDA toolkit must not declare CUDA
+    dependencies, and detection cannot tell the two cases apart.
+
+    The wheel build exports this as CU_VERSION; DESIRED_CUDA is the matrix field name and is
+    accepted only so local invocations keep working.
+    """
+    train = (
+        (os.environ.get("CU_VERSION") or os.environ.get("DESIRED_CUDA") or "")
+        .strip()
+        .lower()
+    )
+    if not train:
+        return ""
+    train = train.removeprefix("cu").replace(".", "")
+    return train if train.isdigit() else ""
+
+
+# The published project names for the CUDA runtime components this wheel links but does not
+# bundle, keyed by CUDA major. These are not derivable from a suffix rule: the CUDA 12 wheels
+# carry a "-cu12" suffix while the CUDA 13 wheels are published under unsuffixed names, and the
+# suffixed CUDA 13 projects are placeholders that ship no binaries. A train with no entry gets
+# no declared dependencies, which is safer than requesting a name that may not exist.
+_CUDA_RUNTIME_PACKAGES = {
+    "12": ("nvidia-cuda-runtime-cu12", "nvidia-curand-cu12", "nvidia-cublas-cu12"),
+    "13": ("nvidia-cuda-runtime", "nvidia-curand", "nvidia-cublas"),
+}
+
+
+def _cuda_dependencies() -> List[str]:
+    """Runtime libraries a CUDA wheel needs but does not bundle.
+
+    Empty for a CPU wheel, and empty for a build whose CUDA train is unknown or unmapped, so
+    the CPU rows are unaffected.
+    """
+    train = _cuda_train()
+    if not train:
+        return []
+    # The CUDA train alone decides this. An earlier version also required
+    # EXECUTORCH_BUILD_CUDA, but that reaches the build as a CMake argument rather than an
+    # environment variable, so the condition was never true and a CUDA wheel shipped with no
+    # declared CUDA dependencies at all.
+    packages = _CUDA_RUNTIME_PACKAGES.get(train[:2])
+    if not packages:
+        return []
+    # Only what the delegate and its shim actually link. A shorter list keeps a CUDA install
+    # from pulling in libraries nothing in this wheel references.
+    #
+    # Bounded to the major this wheel was built against, which is the same key that selected the
+    # names. Without an upper bound, the day a newer CUDA major publishes, a fresh install of an
+    # unchanged wheel resolves to it, and a different major carries a different library version
+    # than the shipped code links, so the wheel installs and then fails to load.
+    major = int(train[:2])
+    return [
+        f"{name}>={major},<{major + 1}; platform_system == 'Linux'" for name in packages
+    ]
+
+
 def _minimal_cmake_flags() -> List[str]:
     return [
         "-DEXECUTORCH_BUILD_COREML=OFF",
@@ -1247,7 +1308,7 @@ if _is_minimal_build():
     setup_kwargs["packages"] = _minimal_packages()
     setup_kwargs["install_requires"] = _minimal_dependencies()
 else:
-    setup_kwargs["install_requires"] = _base_dependencies()
+    setup_kwargs["install_requires"] = _base_dependencies() + _cuda_dependencies()
 
 
 setup(

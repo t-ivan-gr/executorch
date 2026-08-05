@@ -1391,6 +1391,45 @@ setup(
                         "EXECUTORCH_BUILD_XNNPACK",
                     ],
                 ),
+                # Install the CUDA delegate beside them when it is built. The CUDA
+                # runtime itself is not bundled; it comes from the environment.
+                # Gated on the shared runtime as well, because the versioned file name
+                # below only exists in a shared build. Without it the target is a static
+                # archive, the glob matches nothing, and the wheel build fails rather
+                # than skipping the file.
+                BuiltFile(
+                    src_dir="%CMAKE_CACHE_DIR%/backends/cuda/",
+                    src_name=(
+                        f"libexecutorch_backend_cuda.so.{get_runtime_soname_major()}.*"
+                    ),
+                    dst=(
+                        "executorch/lib/libexecutorch_backend_cuda.so."
+                        f"{get_runtime_soname_major()}"
+                    ),
+                    dependent_cmake_flags=[
+                        "EXECUTORCH_BUILD_SHARED",
+                        "EXECUTORCH_BUILD_CUDA",
+                    ],
+                ),
+                # The CUDA delegate and the AOTI shim both call into this for stream
+                # handling, so an application that links either from the wheel cannot
+                # resolve it unless this ships too. Gated the same way as the delegate,
+                # since both carry a versioned file name only in a shared build.
+                BuiltFile(
+                    src_dir="%CMAKE_CACHE_DIR%/extension/cuda/",
+                    src_name=(
+                        "libexecutorch_extension_cuda.so."
+                        f"{get_runtime_soname_major()}.*"
+                    ),
+                    dst=(
+                        "executorch/lib/libexecutorch_extension_cuda.so."
+                        f"{get_runtime_soname_major()}"
+                    ),
+                    dependent_cmake_flags=[
+                        "EXECUTORCH_BUILD_SHARED",
+                        "EXECUTORCH_BUILD_CUDA",
+                    ],
+                ),
                 # Install the prebuilt pybindings extension wrapper for the runtime,
                 # portable kernels, and a selection of backends. This lets users
                 # load and execute .pte files from python.

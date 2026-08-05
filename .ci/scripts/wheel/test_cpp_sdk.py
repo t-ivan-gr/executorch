@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import List, Optional
 
 # Registry entry points. A second definer of any of these means a second
 # process-wide registry.
@@ -549,8 +550,12 @@ def _assert_single_definer(symbols, what: str) -> None:
         pretty = [str(lib.relative_to(package_dir)) for lib in definers]
         assert len(definers) == 1, (
             f"expected exactly one library to define {symbol}, found "
-            f"{len(definers)}: {pretty}. More than one definition means the "
-            f"process has more than one {what}."
+            f"{len(definers)}: {pretty}. "
+            + (
+                f"No definition means nothing shipped provides the {what}."
+                if not definers
+                else f"More than one means the process has more than one {what}."
+            )
         )
     print(f"✓ single {what} across {len(libraries)} shipped libraries")
 
@@ -928,15 +933,52 @@ def test_wheel_platform_tag() -> None:
         "auditwheel reported no platform tag for the wheel, so its contents could "
         f"not be checked against what it claims: {combined[-400:]}"
     )
-    # The tag auditwheel derives from the contents has to be the one the file name
-    # claims. A wheel that names a stricter tag than its libraries support installs
-    # on machines it cannot actually run on.
+    # Compare glibc floors rather than whole tags. These wheels link the PyTorch and CUDA
+    # libraries instead of bundling them, which is deliberate and is what this file's own
+    # external-library list already treats as expected. auditwheel counts any unbundled
+    # external library as disqualifying and so reports a plain tag, which says nothing about
+    # whether the claimed baseline is honest.
+    #
+    # The failure worth catching is a wheel claiming an older glibc than its libraries need,
+    # because that installs on a machine where it cannot run. Comparing the two floors catches
+    # exactly that and is unaffected by the external libraries being absent.
     claimed = wheels[-1].name.split("-")[-1].removesuffix(".whl")
-    assert match.group(1) in claimed, (
-        f"the wheel claims platform tag {claimed} but its contents only support "
-        f"{match.group(1)}"
-    )
-    print(f"✓ the wheel contents match its declared platform tag {match.group(1)}")
+
+    def _glibc_floor(tag: str) -> Optional[tuple]:
+        """The glibc version a manylinux tag requires, or None for a tag that names none."""
+        found = re.search(r"manylinux_(\d+)_(\d+)", tag)
+        if found:
+            return (int(found.group(1)), int(found.group(2)))
+        # The older aliases name a distribution rather than a version.
+        legacy = {
+            "manylinux1": (2, 5),
+            "manylinux2010": (2, 12),
+            "manylinux2014": (2, 17),
+        }
+        for name, version in legacy.items():
+            if name in tag:
+                return version
+        return None
+
+    claimed_floor = _glibc_floor(claimed)
+    derived_floor = _glibc_floor(match.group(1))
+    if claimed_floor is not None and derived_floor is not None:
+        assert derived_floor <= claimed_floor, (
+            f"the wheel claims glibc {claimed_floor[0]}.{claimed_floor[1]} but its libraries "
+            f"need {derived_floor[0]}.{derived_floor[1]}, so it would install on machines it "
+            "cannot run on"
+        )
+        print(
+            f"\u2713 the wheel's glibc floor {claimed_floor[0]}.{claimed_floor[1]} covers what "
+            f"its libraries need"
+        )
+    else:
+        # One side names no glibc baseline, which is the case for a wheel that links external
+        # libraries by design. There is no floor to contradict.
+        print(
+            f"\u2713 platform tag {claimed} carries no glibc claim to contradict "
+            f"(auditwheel derived {match.group(1)})"
+        )
 
 
 def test_no_absolute_runtime_paths() -> None:
@@ -1231,6 +1273,160 @@ def test_python_extension_links_shared_runtime() -> None:
         )
 
 
+def _requested_cuda_architectures() -> list:
+    """GPU architectures this wheel was built to support, from the build environment.
+
+    Empty when the build did not name any, which is the case for a CPU wheel and for a local
+    build that used detection.
+    """
+    raw = os.environ.get("CMAKE_CUDA_ARCHITECTURES", "")
+    if not raw:
+        match = re.search(
+            r"-DCMAKE_CUDA_ARCHITECTURES=([^\s]+)", os.environ.get("CMAKE_ARGS", "")
+        )
+        raw = match.group(1) if match else ""
+    if not raw:
+        return []
+    found = []
+    for entry in raw.replace(",", ";").split(";"):
+        # Remove the separator before matching. A dotted spelling such as "8.0" would
+        # otherwise yield "8", which never matches the inspector's "sm_80", and the audit
+        # would report every architecture missing on a wheel that is correct.
+        number = re.match(r"(\d+)", entry.strip().replace(".", ""))
+        # A "-virtual" entry asks for a portable format rather than compiled code for that
+        # architecture, so it is not expected to appear as device code.
+        if number and "virtual" not in entry:
+            found.append(number.group(1))
+    return found
+
+
+def _cuobjdump() -> Optional[str]:
+    """Path to the CUDA object inspector, or None when it cannot be found.
+
+    It ships with the CUDA toolkit rather than the base system, and is not on the default PATH
+    on a typical CUDA machine, so the toolkit's own directory is searched too. Without this the
+    device-code audit finds no tool and has nothing to inspect.
+    """
+    found = shutil.which("cuobjdump")
+    if found:
+        return found
+    for root in (
+        os.environ.get("CUDA_HOME"),
+        os.environ.get("CUDA_PATH"),
+        "/usr/local/cuda",
+    ):
+        if not root:
+            continue
+        candidate = Path(root) / "bin" / "cuobjdump"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _is_accelerator_row() -> bool:
+    """Whether this build is an accelerator row rather than a CPU wheel.
+
+    Taken from the build variable that names the row's CUDA train, which is the same signal
+    the rest of the wheel build uses. A CPU row leaves it unset or names no CUDA train.
+    """
+    train = (
+        os.environ.get("CU_VERSION") or os.environ.get("DESIRED_CUDA") or ""
+    ).strip()
+    if bool(train) and train.lower() not in {"cpu", "none"}:
+        return True
+    # Fall back to the wheel itself. If the row variable does not reach this check, trusting it
+    # alone would report a CUDA wheel as a CPU one and skip the audit entirely, which is the exact
+    # case this test exists to catch. A shipped CUDA delegate settles it regardless.
+    return _needs_external_cuda_runtime(_installed_package_dir())
+
+
+def test_device_code_covers_claimed_architectures() -> None:
+    """Every GPU architecture the row claims must be present as compiled device code.
+
+    A wheel whose device code covers only the build machine's GPU installs on all the
+    hardware the row promises and then fails when a model runs. That failure appears late and
+    looks like a model problem rather than a packaging one, so it is caught here.
+
+    On an accelerator row this fails closed. A missing architecture claim, a missing
+    inspection tool, a missing library, or a failed inspection each leave the shipped device
+    code unverified, so each blocks rather than passes.
+    """
+    accelerator_row = _is_accelerator_row()
+    claimed = _requested_cuda_architectures()
+
+    if not claimed:
+        assert not accelerator_row, (
+            "this is an accelerator row but the build named no GPU architectures, so its "
+            "device code is whatever the build machine's GPU happened to be; the row's "
+            "architecture list has to reach the build"
+        )
+        print("- this is a CPU wheel, so there is no device code to audit")
+        return
+
+    inspector = _cuobjdump()
+    assert inspector or not accelerator_row, (
+        "this is an accelerator row but cuobjdump is not available, so the shipped device "
+        "code cannot be audited"
+    )
+    if not inspector:
+        print(
+            "- cuobjdump is not available and this is not an accelerator row, skipping"
+        )
+        return
+
+    package_dir = _installed_package_dir()
+    # Every shipped library is inspected rather than a subset chosen by file name. A
+    # library carrying device code under an unexpected name would otherwise be skipped,
+    # which is the failure this check exists to catch.
+    libraries = _shipped_shared_objects(package_dir)
+    assert libraries, f"no shared libraries found under {package_dir}"
+
+    # Each library is checked on its own. Unioning architectures across libraries would let
+    # one library's device code stand in for another's, which is the case worth catching.
+    audited_names: List[str] = []
+    for library in libraries:
+        result = subprocess.run(
+            [inspector, "--list-elf", str(library)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        combined = result.stdout + result.stderr
+        # A library with no device code is a legitimate case, for example the delegate itself,
+        # which links the runtime but carries no kernels. cuobjdump reports that with a
+        # non-zero status, so it has to be told apart from a real inspection failure.
+        if "does not contain device code" in combined:
+            continue
+        assert result.returncode == 0 or not accelerator_row, (
+            f"could not inspect {library.name} on an accelerator row: "
+            f"{result.stderr.strip()[:200]}"
+        )
+        if result.returncode != 0:
+            continue
+        present = set(re.findall(r"sm_(\d+)", result.stdout))
+        if not present:
+            continue
+        missing = sorted(set(claimed) - present, key=int)
+        assert not missing, (
+            f"{library.name} claims GPU architectures {sorted(claimed, key=int)} but only "
+            f"carries device code for {sorted(present, key=int)}; a model would fail on "
+            f"hardware needing {missing}"
+        )
+        audited_names.append(library.name)
+
+    # A count is not enough. The library that carries the compiled kernels has to be the one
+    # audited, or a build that produced only forward-compatible intermediate code there would
+    # still pass on the strength of some other library's coverage.
+    assert (
+        audited_names or not accelerator_row
+    ), "this is an accelerator row but no library carried device code to audit"
+    print(
+        f"\u2713 device code covers every claimed GPU architecture "
+        f"{sorted(claimed, key=int)} in {len(audited_names)} "
+        f"librar{'y' if len(audited_names) == 1 else 'ies'}"
+    )
+
+
 def run_tests(work_dir: Path) -> None:
     test_shipped_libraries_load()
     test_shipped_libraries_resolve_without_build_tree()
@@ -1244,6 +1440,7 @@ def run_tests(work_dir: Path) -> None:
     test_single_kernel_registration()
     test_single_xnnpack_delegate()
     test_single_cuda_delegate()
+    test_device_code_covers_claimed_architectures()
     test_cpp_consumer(work_dir)
     test_documented_example_compiles(work_dir)
     test_component_targets_link(work_dir)

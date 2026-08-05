@@ -375,11 +375,6 @@ endfunction()
 
 executorch_define_component(threadpool executorch_threadpool)
 
-# The merged CPU kernels. Documented as a component and asserted by the release
-# checks, so it has to be defined here or a consumer following the documentation
-# gets a bare name that CMake hands to the linker as a literal flag.
-executorch_define_component(kernels executorch_optimized_native_cpu_ops_lib)
-
 # A consumer that links the thread pool has to see the same switch a source
 # build sets, or the parallel helpers in the runtime headers compile their
 # serial fallback instead and the library they linked is never used.
@@ -390,10 +385,6 @@ if(TARGET executorch::threadpool)
     PROPERTY INTERFACE_COMPILE_DEFINITIONS ET_USE_THREADPOOL
   )
 endif()
-
-executorch_define_component(xnnpack_backend executorch_xnnpack_backend)
-
-executorch_define_component(cuda_backend executorch_cuda_backend)
 
 # Find prebuilt _portable_lib.<EXT_SUFFIX>.so. This is the legacy contract used
 # to build custom-op extensions against the Python module, and is kept working

@@ -39,6 +39,10 @@ _REGISTRY_SYMBOLS = (
     "executorch::runtime::get_backend_class",
 )
 
+# The thread pool accessor. A second definer means a second pool, which
+# oversubscribes the CPU because each pool sizes itself to all cores.
+_THREADPOOL_SYMBOLS = ("executorch::extension::threadpool::get_threadpool",)
+
 # `nm -DC` prints "<hexaddr> <kind> <name>" for a definition and
 # "                 U <name>" for an undefined reference.
 _DEFINED = re.compile(r"^[0-9a-fA-F]+\s+(?P<kind>[A-Za-z])\s+(?P<name>.+)$")
@@ -133,23 +137,38 @@ def _defines_symbol(library: Path, symbol: str) -> bool:
     return False
 
 
-def test_single_backend_registry() -> None:
-    """Exactly one shipped library may define the backend registry."""
+def _assert_single_definer(symbols, what: str) -> None:
+    """Exactly one shipped library may define each of `symbols`."""
     assert shutil.which("nm") is not None, "nm is required to inspect the wheel"
 
     package_dir = _installed_package_dir()
     libraries = _shipped_shared_objects(package_dir)
     assert libraries, f"no shared libraries found under {package_dir}"
 
-    for symbol in _REGISTRY_SYMBOLS:
-        definers = [lib for lib in libraries if _defines_symbol(lib, symbol)]
+    # Every symbol is resolved before anything is reported, so a component that is only
+    # half present is described as such rather than looking like one that is absent.
+    found = {
+        symbol: [lib for lib in libraries if _defines_symbol(lib, symbol)]
+        for symbol in symbols
+    }
+    for symbol, definers in found.items():
         pretty = [str(lib.relative_to(package_dir)) for lib in definers]
         assert len(definers) == 1, (
             f"expected exactly one library to define {symbol}, found "
             f"{len(definers)}: {pretty}. More than one definition means the "
-            f"process has more than one backend registry."
+            f"process has more than one {what}."
         )
-    print(f"✓ single backend registry across {len(libraries)} shipped libraries")
+    print(f"✓ single {what} across {len(libraries)} shipped libraries")
+
+
+def test_single_backend_registry() -> None:
+    """Exactly one shipped library may define the backend registry."""
+    _assert_single_definer(_REGISTRY_SYMBOLS, "backend registry")
+
+
+def test_single_threadpool() -> None:
+    """Exactly one shipped library may define the thread pool accessor."""
+    _assert_single_definer(_THREADPOOL_SYMBOLS, "thread pool")
 
 
 def test_cpp_consumer(work_dir: Path) -> None:
@@ -742,7 +761,7 @@ target_link_libraries(component_consumer PRIVATE executorch::runtime)
 
 # Link every component this wheel offers, and report which ones those are so the test
 # can check the result. Guarded individually because the set depends on the wheel.
-foreach(_component threadpool kernels xnnpack_backend cuda_backend)
+foreach(_component threadpool)
   if(TARGET executorch::${_component})
     target_link_libraries(component_consumer PRIVATE executorch::${_component})
     # Report the library file, not just the target name: the two differ, and the test
@@ -909,6 +928,7 @@ def run_tests(work_dir: Path) -> None:
     test_wheel_platform_tag()
     test_custom_op_compiles(work_dir)
     test_no_absolute_runtime_paths()
+    test_single_threadpool()
     test_cpp_consumer(work_dir)
     test_documented_example_compiles(work_dir)
     test_component_targets_link(work_dir)

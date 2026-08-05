@@ -56,6 +56,12 @@ _KERNEL_REGISTRY_SYMBOLS = (
     "executorch::runtime::get_registered_kernels",
 )
 
+# A representative symbol from the XNNPACK delegate. A second definer means the
+# process carries two copies of the delegate.
+_XNNPACK_SYMBOLS = (
+    "executorch::backends::xnnpack::XnnpackBackendOptions::workspace_manager",
+)
+
 # `nm -DC` prints "<hexaddr> <kind> <name>" for a definition and
 # "                 U <name>" for an undefined reference.
 _DEFINED = re.compile(r"^[0-9a-fA-F]+\s+(?P<kind>[A-Za-z])\s+(?P<name>.+)$")
@@ -192,6 +198,11 @@ def test_single_kernel_registration() -> None:
     # a table nothing else reads shows up as an operator that is missing at run
     # time rather than as a link error.
     _assert_single_definer(_KERNEL_REGISTRY_SYMBOLS, "operator registry")
+
+
+def test_single_xnnpack_delegate() -> None:
+    """Exactly one shipped library may define the XNNPACK delegate."""
+    _assert_single_definer(_XNNPACK_SYMBOLS, "XNNPACK delegate")
 
 
 def test_cpp_consumer(work_dir: Path) -> None:
@@ -784,7 +795,7 @@ target_link_libraries(component_consumer PRIVATE executorch::runtime)
 
 # Link every component this wheel offers, and report which ones those are so the test
 # can check the result. Guarded individually because the set depends on the wheel.
-foreach(_component threadpool kernels_optimized kernels_quantized etdump)
+foreach(_component threadpool kernels_optimized kernels_quantized etdump backend_xnnpack)
   if(TARGET executorch::${_component})
     target_link_libraries(component_consumer PRIVATE executorch::${_component})
     # Report the library file, not just the target name: the two differ, and the test
@@ -953,6 +964,7 @@ def run_tests(work_dir: Path) -> None:
     test_no_absolute_runtime_paths()
     test_single_threadpool()
     test_single_kernel_registration()
+    test_single_xnnpack_delegate()
     test_cpp_consumer(work_dir)
     test_documented_example_compiles(work_dir)
     test_component_targets_link(work_dir)

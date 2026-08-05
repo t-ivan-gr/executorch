@@ -44,9 +44,6 @@
 # dependency and, for a registration-only library, the link options that keep it
 # from being dropped. The names, when present, are:
 #
-# executorch::threadpool executorch::kernels_optimized
-# executorch::xnnpack_backend executorch::cuda_backend
-#
 # Check with if(TARGET executorch::<name>) rather than assuming one exists. A
 # namespaced name that was never defined is a configure-time error that names
 # the component, so a consumer who links one unconditionally gets a clear
@@ -398,6 +395,8 @@ if(TARGET executorch::threadpool)
     PROPERTY INTERFACE_COMPILE_DEFINITIONS ET_USE_THREADPOOL
   )
 endif()
+
+executorch_define_component(backend_xnnpack executorch_backend_xnnpack)
 
 # Find prebuilt _portable_lib.<EXT_SUFFIX>.so. This is the legacy contract used
 # to build custom-op extensions against the Python module, and is kept working

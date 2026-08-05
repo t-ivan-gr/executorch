@@ -108,7 +108,6 @@ each one is defined only when the installed wheel actually ships it:
 | --- | --- |
 | `executorch::runtime` | The core runtime. Always present. |
 | `executorch::threadpool` | The shared thread pool the kernels and backends use. |
-| `executorch::kernels_optimized` | CPU operator kernels, for any operator not taken by a backend. |
 
 Each target already carries what it needs: the runtime dependency, the include
 directories, the runtime search paths, and the linker options that keep a
